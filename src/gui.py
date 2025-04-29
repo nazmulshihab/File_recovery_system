@@ -8,7 +8,6 @@ from tkinter import Listbox, MULTIPLE, END, Scrollbar, RIGHT, Y, LEFT, BOTH, Fra
 
 from scanner import unified_scan, TEMP_REC_DIR
 from logger import log_recovery
-from preview import get_preview
 
 FINAL_REC_DIR = "./final_recovered_files"
 
@@ -16,7 +15,7 @@ class RecoveryApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("File Recovery Tool")
-        self.geometry("700x750")
+        self.geometry("500x600")
 
         ctk.CTkLabel(self, text="Select Partition:").pack(pady=10)
         self.drive_var = ctk.StringVar()
