@@ -2,6 +2,7 @@ import os
 import pytsk3
 from recovery_utils import recover_by_signature
 
+# Where both metadata and carved files go, before final copy
 TEMP_REC_DIR = "./recovered_files"
 
 class RawImg(pytsk3.Img_Info):
@@ -16,66 +17,86 @@ class RawImg(pytsk3.Img_Info):
     def get_size(self):
         cur = self._fd.tell()
         self._fd.seek(0, os.SEEK_END)
-        size = self._fd.tell()
+        sz = self._fd.tell()
         self._fd.seek(cur)
-        return size
+        return sz
 
-def recursive_scan(fs_info, directory, progress_callback, recover_names):
-    """
-    Walk every entry in 'directory'.  Skip NTFS system files,
-    but for each other entry:
-      - report "Scanning file: name"
-      - append name to recover_names
-      - recurse if it's a subdirectory
-    """
-    for file in directory:
+def recursive_scan(fs_info, directory, progress_callback, idx, total, names):
+    """Walk the FS tree, report each filename, collect all deleted names."""
+    for f in directory:
         try:
-            raw  = file.info.name.name or b""
-            name = raw.decode('latin1', errors='ignore') or "<unknown>"
+            raw  = f.info.name.name or b""
+            name = raw.decode("latin1", errors="ignore") or "<unknown>"
 
-            # Terminal + GUI update:
-            print(f"Scanning file: {name}")
+            idx[0] += 1
+            pct = idx[0] / total
             if progress_callback:
-                progress_callback(None, name)
+                progress_callback(pct, name)
+            print(f"Scanning file: {name}")
 
-            # Skip system metadata files
+            # Skip system entries
             if name.startswith("$"):
                 continue
 
-            # Always record it as a candidate
-            recover_names.append(name)
+            names.append(name)
 
-            # Recurse into subdirs
-            if (file.info.meta and
-                file.info.meta.type == pytsk3.TSK_FS_META_TYPE_DIR and
+            # Recurse into directories
+            if (f.info.meta and
+                f.info.meta.type == pytsk3.TSK_FS_META_TYPE_DIR and
                 name not in (".","..")):
                 try:
-                    sub = file.as_directory()
-                    recursive_scan(fs_info, sub, progress_callback, recover_names)
+                    sub = f.as_directory()
+                    recursive_scan(fs_info, sub, progress_callback, idx, total, names)
                 except Exception:
                     pass
 
         except Exception as e:
             print(f"Error processing {name}: {e}")
 
+def count_entries(fs_info, directory):
+    """Count all non-system entries (for progress estimation)."""
+    cnt = 0
+    for f in directory:
+        try:
+            raw  = f.info.name.name or b""
+            name = raw.decode("latin1", errors="ignore") or "<unknown>"
+            if name.startswith("$"):
+                continue
+            cnt += 1
+            if (f.info.meta and
+                f.info.meta.type == pytsk3.TSK_FS_META_TYPE_DIR and
+                name not in (".","..")):
+                cnt += count_entries(fs_info, f.as_directory())
+        except Exception:
+            pass
+    return cnt
+
 def list_deleted_files(disk_path, progress_callback=None):
     """
-    Metadata phase: walk every file and collect names.
-    Returns list of filenames.
+    Metadata‐only pass: finds deleted filenames via unallocated flags or FAT markers.
+    Returns list of original names.
     """
     names = []
     try:
-        img = RawImg(disk_path)
-        fs  = pytsk3.FS_Info(img)
-        root= fs.open_dir("/")
+        img  = RawImg(disk_path)
+        fs   = pytsk3.FS_Info(img)
+        root = fs.open_dir("/")
 
+        # Step 1: count total entries
         if progress_callback:
-            progress_callback(None, "Metadata-based scan started")
-        recursive_scan(fs, root, progress_callback, names)
+            progress_callback(0, "Counting files…")
+        total = count_entries(fs, root)
+
+        # Step 2: recursive scan
         if progress_callback:
-            progress_callback(None, "Metadata-based scan done")
+            progress_callback(0, "Metadata scanning started")
+        idx = [0]
+        recursive_scan(fs, root, progress_callback, idx, total, names)
+        if progress_callback:
+            progress_callback(1.0, "Metadata scanning done")
 
         img.close()
+
     except Exception as e:
         print(f"Metadata scan failed: {e}")
 
@@ -83,67 +104,72 @@ def list_deleted_files(disk_path, progress_callback=None):
 
 def recover_metadata(disk_path, names, output_dir=TEMP_REC_DIR):
     """
-    Given a list of filenames, dump their full contents to disk
-    named meta_1.ext, meta_2.ext, ... in output_dir.
+    Dump each metadata‐found file under its ORIGINAL name into output_dir.
     """
     os.makedirs(output_dir, exist_ok=True)
     recovered = []
-
     try:
         img = RawImg(disk_path)
         fs  = pytsk3.FS_Info(img)
 
-        for idx, name in enumerate(names, start=1):
+        for name in names:
             try:
+                # Read the file’s full data
                 fobj = fs.open(name)
-                size = fobj.info.meta.size
+                size = fobj.info.meta.size or 0
+                if size <= 0:
+                    print(f"Skipping zero‐length file: {name}")
+                    continue
+
                 data = fobj.read_random(0, size)
 
-                ext = os.path.splitext(name)[1] or ""
-                out = os.path.join(output_dir, f"meta_{idx}{ext}")
+                # Build a safe path: strip leading slash, create subdirs
+                clean = name.lstrip(os.sep)
+                out_path = os.path.join(output_dir, clean)
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-                with open(out, "wb") as w:
+                with open(out_path, "wb") as w:
                     w.write(data)
+                recovered.append(out_path)
+                print(f"Metadata recovered: {out_path}")
 
-                recovered.append(out)
-                print(f"Metadata recovered: {out}")
             except Exception as ex:
-                print(f"Failed metadata recover {name}: {ex}")
+                print(f"Metadata dump failed for {name}: {ex}")
 
         img.close()
+
     except Exception as e:
-        print(f"Metadata recovery setup failed: {e}")
+        print(f"Metadata recovery error: {e}")
 
     return recovered
 
 def unified_scan(disk_path, progress_callback=None):
     """
-    1) Metadata-based walking & recovery
-    2) Signature-based carving
-    Returns full paths of everything dumped under ./recovered_files
+    1) Metadata pass → list & dump originals
+    2) Signature carving → carve new files
+    Returns combined list of file‐paths in TEMP_REC_DIR.
     """
     all_paths = []
 
-    # Phase 1: metadata
+    # Metadata phase
     names    = list_deleted_files(disk_path, progress_callback)
     md_paths = recover_metadata(disk_path, names, TEMP_REC_DIR)
     all_paths.extend(md_paths)
-
-    # Report each metadata file
     for p in md_paths:
         if progress_callback:
             progress_callback(None, f"Meta recov: {os.path.basename(p)}")
 
-    # Phase 2: carving
+    # Carving phase
     if progress_callback:
-        progress_callback(None, "Signature-based scan started")
-    carve_paths = recover_by_signature(disk_path, TEMP_REC_DIR)
+        progress_callback(None, "Signature scanning started")
+    carve_paths = recover_by_signature(
+        disk_path,
+        TEMP_REC_DIR,
+        progress_callback=progress_callback
+    )
     all_paths.extend(carve_paths)
 
-    for p in carve_paths:
-        if progress_callback:
-            progress_callback(None, f"Carved: {os.path.basename(p)}")
     if progress_callback:
-        progress_callback(None, "Signature-based scan done")
+        progress_callback(1.0, "Signature scanning done")
 
     return all_paths

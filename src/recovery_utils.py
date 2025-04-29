@@ -1,78 +1,121 @@
 import os
-from PIL import Image
 from io import BytesIO
+from PIL import Image
+import PyPDF2
 
-# Define file signatures for multiple file types.
+# Extended signature list
 FILE_SIGNATURES = {
-    "jpg": ("jpg", b"\xff\xd8", b"\xff\xd9"),
-    "jpeg": ("jpeg", b"\xff\xd8", b"\xff\xd9"),
-    "png": ("png", b"\x89PNG\r\n\x1a\n", b"IEND\xaeB`\x82"),
-    "pdf": ("pdf", b"%PDF", b"%%EOF"),
-    "mp3": ("mp3", b"\x49\x44\x33", None),  
-    "mp4": ("mp4", b"\x00\x00\x00\x18ftyp", None), 
-    "mkv": ("mkv", b"\x1A\x45\xDF\xA3", None),  
+    "jpg":  ("jpg",  b"\xFF\xD8\xFF",            b"\xFF\xD9"),
+    "jpeg": ("jpeg", b"\xFF\xD8\xFF",            b"\xFF\xD9"),
+    "png":  ("png",  b"\x89PNG\r\n\x1a\n",       b"IEND\xaeB`\x82"),
+    "pdf":  ("pdf",  b"%PDF",                    b"%%EOF"),
+    "mp3":  ("mp3",  b"ID3",                     None),
+    "mp4":  ("mp4",  b"\x00\x00\x00\x18ftyp",    None),
+    "mkv":  ("mkv",  b"\x1A\x45\xDF\xA3",        None),
+    "xlsx": ("xlsx", b"PK\x03\x04",              None),
+    # "txt":  ("txt",  b"\n",                      None),
 }
 
-def is_valid_image(data):
+def is_valid_image(data: bytes) -> bool:
     try:
         img = Image.open(BytesIO(data))
         img.verify()
         return True
-    except Exception:
+    except:
         return False
 
-def recover_by_signature(disk_path, output_dir, chunk_size=4096):
+def is_valid_pdf(data: bytes) -> bool:
+    return data.startswith(b"%PDF") and b"%%EOF" in data
+
+def recover_by_signature(
+    disk_path: str,
+    output_dir: str,
+    chunk_size: int = 4096,
+    progress_callback = None
+) -> list[str]:
+    """
+    Carve files by signature, validate only real images/PDFs, write as carved_i.ext,
+    and report each “Scanning for file: carved_i.ext” and “Recovered file: carved_i.ext”.
+    """
     os.makedirs(output_dir, exist_ok=True)
-    recovered_files = []
+    recovered = []
     file_index = 1
+
+    # Safely get size for progress
+    try:
+        total_size = os.path.getsize(disk_path)
+    except OSError:
+        total_size = 0
 
     with open(disk_path, "rb") as disk:
         buffer = b""
+        read_so_far = 0
+
         while True:
             chunk = disk.read(chunk_size)
             if not chunk:
                 break
             buffer += chunk
+            read_so_far += len(chunk)
 
+            # Carving per signature
             for key, (extension, header, footer) in FILE_SIGNATURES.items():
                 start = buffer.find(header)
                 while start != -1:
-                    if footer is not None:
+                    # Filename to carve
+                    fname = f"carved_{file_index}.{extension}"
+                    msg = f"Scanning currently: {fname}"
+                    print(msg)
+                    if progress_callback:
+                        progress_callback(None, msg)
+
+                    # Determine carve end
+                    if footer:
                         end = buffer.find(footer, start)
                         if end != -1:
                             end += len(footer)
-                            file_data = buffer[start:end]
+                            data = buffer[start:end]
                             buffer = buffer[end:]
                         else:
-                            # Footer not found, retain partial buffer
                             buffer = buffer[start:]
                             break
                     else:
-                        # No footer; carve up to MAX_SIZE or end of buffer
-                        MAX_SIZE = 2 * 1024 * 1024  # 2MB (tweak if needed)
-                        end = min(start + MAX_SIZE, len(buffer))
-                        file_data = buffer[start:end]
+                        MAX = 5 * 1024 * 1024
+                        end = min(start + MAX, len(buffer))
+                        data = buffer[start:end]
                         buffer = buffer[end:]
 
-                    filename = os.path.join(output_dir, f"carved_{file_index}.{extension}")
-                    try:
-                        with open(filename, "wb") as f:
-                            f.write(file_data)
-                        recovered_files.append(filename)
-                        print(f"Recovered file: {filename}")
-                    except Exception as e:
-                        print(f"Error writing {filename}: {e}")
-                    file_index += 1
+                    # Validate before writing
+                    valid = True
+                    if extension in ("jpg", "jpeg", "png"):
+                        valid = is_valid_image(data)
+                    elif extension == "pdf":
+                        valid = is_valid_pdf(data)
+                    # else: assume audio/video/txt/xlsx is OK
+
+                    if valid:
+                        out = os.path.join(output_dir, fname)
+                        try:
+                            with open(out, "wb") as w:
+                                w.write(data)
+                            recovered.append(out)
+                            done_msg = f"Recovered file: {fname}"
+                            print(done_msg)
+                            if progress_callback:
+                                progress_callback(None, done_msg)
+                        except Exception as e:
+                            print(f"Error writing {out}: {e}")
+                        file_index += 1
+
                     start = buffer.find(header)
 
-
-            # Keep the buffer small
+            # Trim buffer to avoid runaway memory
             if len(buffer) > chunk_size * 10:
                 buffer = buffer[-chunk_size * 10:]
-    
-    return recovered_files
 
+            # Optionally report carve-phase progress
+            if total_size and progress_callback:
+                pct = read_so_far / total_size
+                progress_callback(pct, f"Carving disk: {int(pct*100)}%")
 
-
-
-
+    return recovered

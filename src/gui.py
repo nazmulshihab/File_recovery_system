@@ -9,6 +9,7 @@ from tkinter import Listbox, MULTIPLE, END, Scrollbar, RIGHT, Y, LEFT, BOTH, Fra
 from scanner import unified_scan, TEMP_REC_DIR
 from logger import log_recovery
 
+
 FINAL_REC_DIR = "./final_recovered_files"
 
 class RecoveryApp(ctk.CTk):
@@ -28,11 +29,13 @@ class RecoveryApp(ctk.CTk):
         ctk.CTkButton(self, text="Scan", command=self.start_scan).pack(pady=10)
 
         ctk.CTkLabel(self, text="Recoverable Files:").pack(pady=10)
-        frm = Frame(self); frm.pack(pady=5, fill=BOTH)
-        self.file_listbox = Listbox(frm, selectmode=MULTIPLE,
-            width=35, height=8, bg="#333333", fg="white")
+        frame = Frame(self); frame.pack(pady=5, fill=BOTH)
+        self.file_listbox = Listbox(
+            frame, selectmode=MULTIPLE,
+            width=35, height=8, bg="#333333", fg="white"
+        )
         self.file_listbox.pack(side=LEFT, fill=BOTH, expand=True)
-        sb = Scrollbar(frm, orient="vertical", command=self.file_listbox.yview)
+        sb = Scrollbar(frame, orient="vertical", command=self.file_listbox.yview)
         sb.pack(side=RIGHT, fill=Y)
         self.file_listbox.config(yscrollcommand=sb.set)
         self.file_listbox.bind("<Control-a>", lambda e: self.file_listbox.select_set(0, END))
@@ -61,16 +64,17 @@ class RecoveryApp(ctk.CTk):
     def start_scan(self):
         sel = self.drive_var.get().split()[0]
         if not sel:
-            self.result_label.configure(text="Select a partition first")
+            self.result_label.configure(text="Select a partition")
             return
 
-        # clear prev
+        # Clear previous
         self.file_listbox.delete(0, END)
         self.candidate_paths = []
         self.progress_bar.set(0); self.progress_label.configure(text="0%")
-        self.status_label.configure(text="Scanning…")
+        self.status_label  .configure(text="Scanning…")
+        self.progress_bar.configure(fg_color="red")
 
-        # clear only contents of TEMP_REC_DIR
+        # Wipe temp dir contents
         if os.path.isdir(TEMP_REC_DIR):
             for f in os.listdir(TEMP_REC_DIR):
                 os.remove(os.path.join(TEMP_REC_DIR, f))
@@ -93,6 +97,8 @@ class RecoveryApp(ctk.CTk):
 
     def _finish_scan(self, device, paths):
         self.candidate_paths = paths
+        self.progress_bar.configure(fg_color="yellow")
+        self.status_label.configure(text="Scan done — select files")
         if paths:
             for p in paths:
                 self.file_listbox.insert(END, os.path.basename(p))
@@ -100,9 +106,7 @@ class RecoveryApp(ctk.CTk):
         else:
             self.file_listbox.insert(END, "No files")
             self.result_label.configure(text="No recoverable files")
-
         self.progress_bar.set(1.0); self.progress_label.configure(text="100%")
-        self.status_label.configure(text="Scan finished — select files")
         log_recovery(device, paths)
 
     def recover_selected(self):
@@ -114,8 +118,9 @@ class RecoveryApp(ctk.CTk):
             self.result_label.configure(text="Select files first")
             return
 
-        total = len(idxs)
-        done  = 0
+        self.progress_bar.set(0)
+        self.progress_bar.configure(fg_color="green")
+        total = len(idxs); done = 0
 
         for i in idxs:
             src = self.candidate_paths[i]
@@ -130,17 +135,17 @@ class RecoveryApp(ctk.CTk):
             self.progress_bar.set(pct)
             self.progress_label.configure(text=f"{int(pct*100)}%")
 
-        self.result_label.configure(text=f"Recovered {done} files")
+        self.result_label.configure(text=f"Recoverable {done} files")
+        self.status_label   .configure(text="Successfully Recovered!")
 
-        # clear TEMP_REC_DIR contents post-recovery
+        # Wipe temp dir again
         for f in os.listdir(TEMP_REC_DIR):
             os.remove(os.path.join(TEMP_REC_DIR, f))
 
         self.file_listbox.delete(0, END)
         self.candidate_paths.clear()
-        self.status_label.configure(text="Recovery completed")
-        self.progress_bar.set(1.0); self.progress_label.configure(text="100%")
 
 if __name__=="__main__":
     RecoveryApp().mainloop()
+
 
