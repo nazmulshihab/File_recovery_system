@@ -1,5 +1,6 @@
 recovered_files/
 final_recovered_files/
 recovery.log
+src/recovery.log
 *.pyc
 __pycache__/
