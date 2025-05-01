@@ -4,3 +4,4 @@ recovery.log
 src/recovery.log
 *.pyc
 __pycache__/
+src/__pycache__/
